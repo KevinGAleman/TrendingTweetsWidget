@@ -8,6 +8,7 @@ def using_pods
     pod 'Crashlytics'
     pod 'TwitterKit'
     pod 'TwitterCore'
+    pod 'RealmSwift'
 end
 
 target 'TrendingTweetsWidget' do

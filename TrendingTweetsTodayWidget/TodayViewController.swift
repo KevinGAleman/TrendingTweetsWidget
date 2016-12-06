@@ -11,20 +11,41 @@ import NotificationCenter
 import Fabric
 import TwitterKit
 import Crashlytics
+import RealmSwift
 
-struct TrendData {
-    var name: String
-    var query: String
-    var url: String
+class Trend: Object {
+    dynamic var name: String = ""
+    dynamic var query: String = ""
+    dynamic var url: String = ""
+    dynamic var date: NSDate = NSDate()
+    var tweets = List<Tweet>()
+
+    convenience init(name: String, query: String, url: String) {
+        self.init()
+        self.name = name
+        self.query = query
+        self.url = url
+    }
 }
 
-struct TweetData {
-    var id: String
-    var text: String
-    var userName: String
-    var userScreenName: String
-    var userImgUrl: String
-    var date: String
+class Tweet: Object {
+    dynamic var id: String = ""
+    dynamic var text: String = ""
+    dynamic var userName: String = ""
+    dynamic var userScreenName: String = ""
+    dynamic var userImgUrl: String = ""
+    dynamic var userImg: Data? = Data()
+    dynamic var date: String = ""
+
+    convenience init(id: String, text: String, userName: String, userScreenName: String, userImgUrl: String, date: String) {
+        self.init()
+        self.id = id
+        self.text = text
+        self.userName = userName
+        self.userScreenName = userScreenName
+        self.userImgUrl = userImgUrl
+        self.date = date
+    }
 }
 
 class TodayViewController: UIViewController, NCWidgetProviding {
@@ -34,8 +55,8 @@ class TodayViewController: UIViewController, NCWidgetProviding {
     
     // Twitter data properties
     var locationId: Int = 1
-    var trendData: [TrendData] = []
-    var tweetData: [TweetData] = []
+    var trends: [Trend] = []
+    var tweets: [Tweet] = []
     var signedIn = false
     var selectedCell: TrendCell?
 
@@ -66,10 +87,29 @@ class TodayViewController: UIViewController, NCWidgetProviding {
         } else {
             self.signedIn = true
         }
+
+        // Clear Realm DB of any items created earlier than one day ago.
+        let realm = try! Realm()
+        let yesterday = NSDate(timeIntervalSinceNow:-(24*60*60))
+        let predicate = NSPredicate(format: "date < %@", yesterday)
+        let itemsToDelete = realm.objects(Trend.self).filter(predicate)
+
+        if itemsToDelete.count > 0 {
+            try! realm.write {
+                realm.delete(itemsToDelete)
+            }
+        }
     }
     
     override func viewDidLoad() {
         super.viewDidLoad()
+
+        // Reload some old data from Realm so there's data in the VC before making web service calls
+        let realm = try! Realm()
+        trends = realm.objects(Trend.self).map { $0 }
+        if let trend = trends.first {
+            tweets = Array(trend.tweets)
+        }
         
         // Show the login button if we're not signed in.
         loginButton.isHidden = signedIn
@@ -129,12 +169,27 @@ class TodayViewController: UIViewController, NCWidgetProviding {
                 let json = try JSONSerialization.jsonObject(with: data!, options: []) as! [[String: Any?]]
                 let data = json[0] as [String: Any?]
                 
-                if data.count >= 1, let trends = data["trends"] as? [[String: Any?]] {
-                    self.trendData.removeAll()
-                    for trend in trends {
+                if data.count >= 1, let trendJSON = data["trends"] as? [[String: Any?]] {
+                    self.trends.removeAll()
+
+                    let realm = try! Realm()
+                    var newTrends: [Trend] = []
+                    for trend in trendJSON {
                         if let name = trend["name"] as? String, let query = trend["query"] as? String, let url = trend["url"] as? String {
-                            let newTrend = TrendData(name: name, query: query, url: url)
-                            self.trendData.append(newTrend)
+                            let newTrend = Trend.init(name: name, query: query, url: url)
+                            self.trends.append(newTrend)
+
+                            // If we've already saved this trend before, don't save it again.
+                            let nameSearch = NSPredicate(format: "name == %@", name)
+                            let savedObjects = realm.objects(Trend.self).filter(nameSearch)
+                            if savedObjects.count == 0 {
+                                newTrends.append(newTrend)
+                            }
+                        }
+
+                        // Save the new trend data to Realm.
+                        try! realm.write {
+                            realm.add(newTrends)
                         }
                     }
                 }
@@ -152,17 +207,17 @@ extension TodayViewController: UICollectionViewDelegate, UICollectionViewDataSou
         if indexPath.section == trendsViewSection {
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "trendCell", for: indexPath) as! TrendCell
             
-            cell.label.text = trendData[indexPath.row].name
+            cell.label.text = trends[indexPath.row].name
             
             return cell
         } else {
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "tweetCell", for: indexPath) as! TweetCell
             
-            if tweetData.count > 0 {
-                cell.userName.text = tweetData[0].userName
-                cell.userScreenName.text = "@\(tweetData[0].userScreenName)"
-                cell.text.text = tweetData[0].text
-                if let url = URL.init(string: tweetData[0].userImgUrl) {
+            if tweets.count > 0 {
+                cell.userName.text = tweets[0].userName
+                cell.userScreenName.text = "@\(tweets[0].userScreenName)"
+                cell.text.text = tweets[0].text
+                if let url = URL.init(string: tweets[0].userImgUrl) {
                     cell.userImage.downloadedFrom(url: url)
                 }
             }
@@ -178,9 +233,9 @@ extension TodayViewController: UICollectionViewDelegate, UICollectionViewDataSou
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
         if section == trendsViewSection {
             let totalToShow = numOfRows * numOfColumns
-            return trendData.count > totalToShow ? totalToShow : trendData.count
+            return trends.count > totalToShow ? totalToShow : trends.count
         } else {
-            return tweetData.count > 0 ? 1 : 0
+            return tweets.count > 0 ? 1 : 0
         }
     }
     
@@ -205,54 +260,84 @@ extension TodayViewController: UICollectionViewDelegate, UICollectionViewDataSou
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         if indexPath.section == trendsViewSection {
             if isExpanded {
-                resetSelectedCell()
-                
                 // Change the background color for the new selected cell.
+                resetSelectedCell()
                 if let cell = collectionView.cellForItem(at: indexPath) as? TrendCell {
                     cell.backgroundColor = UIColor.init(white: 1.0, alpha: 0.25)
                     selectedCell = cell
                 }
-                
-                let client = TWTRAPIClient.init(userID: Twitter.sharedInstance().sessionStore.session()?.userID)
-                let tweetsEndpoint = "https://api.twitter.com/1.1/search/tweets.json"
-                
-                let params = ["q" : trendData[indexPath.row].query]
-                var clientError : NSError?
-                
-                let request = client.urlRequest(withMethod: "GET", url: tweetsEndpoint, parameters: params, error: &clientError)
-                
-                client.sendTwitterRequest(request) { (response, data, connectionError) -> Void in
-                    if connectionError != nil {
-                        print("Error: \(connectionError)")
+
+                // Clear the current tweets array to make room for the Realm or web response array.
+                self.tweets.removeAll()
+
+                let realm = try! Realm()
+                let trend = trends[indexPath.row]
+                let nameSearch = NSPredicate(format: "name == %@", trend.name)
+                let savedTrends = realm.objects(Trend.self).filter(nameSearch)
+                let savedTrend = savedTrends.first
+
+                var needsUpdate = true
+
+                // If we've saved these tweets, then don't query them again.
+                if savedTrend != nil {
+                    if let trend = savedTrends.first {
+                        if trend.tweets.count > 0 {
+                            needsUpdate = false
+                            tweets = Array(trend.tweets)
+                        }
                     }
-                    
-                    do {
-                        let json = try JSONSerialization.jsonObject(with: data!, options: []) as! [String: Any?]
-                        
-                        if  let tweets = json["statuses"] as? [[String: Any?]] {
-                            self.tweetData.removeAll()
-                            for tweet in tweets {
-                                if let user = tweet["user"] as? [String: Any?] {
-                                    if let id = tweet["id_str"] as? String,
-                                       let text = tweet["text"] as? String,
-                                       let userName = user["name"] as? String,
-                                       let userScreenName = user["screen_name"] as? String,
-                                       let imgUrl = user["profile_image_url_https"] as? String,
-                                       let date = tweet["created_at"] as? String {
-                                        let newTweet = TweetData(id: id, text: text, userName: userName, userScreenName: userScreenName, userImgUrl: imgUrl, date: date)
-                                        self.tweetData.append(newTweet)
+                }
+
+                if needsUpdate {
+                    let client = TWTRAPIClient.init(userID: Twitter.sharedInstance().sessionStore.session()?.userID)
+                    let tweetsEndpoint = "https://api.twitter.com/1.1/search/tweets.json"
+
+                    let params = ["q" : trend.query]
+                    var clientError : NSError?
+
+                    let request = client.urlRequest(withMethod: "GET", url: tweetsEndpoint, parameters: params, error: &clientError)
+
+                    client.sendTwitterRequest(request) { (response, data, connectionError) -> Void in
+                        if connectionError != nil {
+                            print("Error: \(connectionError)")
+                        }
+
+                        do {
+                            let json = try JSONSerialization.jsonObject(with: data!, options: []) as! [String: Any?]
+
+                            if  let tweetsJSON = json["statuses"] as? [[String: Any?]] {
+                                for tweet in tweetsJSON {
+                                    if let user = tweet["user"] as? [String: Any?] {
+                                        if let id = tweet["id_str"] as? String,
+                                            let text = tweet["text"] as? String,
+                                            let userName = user["name"] as? String,
+                                            let userScreenName = user["screen_name"] as? String,
+                                            let imgUrl = user["profile_image_url_https"] as? String,
+                                            let date = tweet["created_at"] as? String {
+                                            let newTweet = Tweet(id: id, text: text, userName: userName, userScreenName: userScreenName, userImgUrl: imgUrl, date: date)
+                                            self.tweets.append(newTweet)
+                                        }
+                                    }
+                                }
+
+                                // Save the tweets to Realm.
+                                if savedTrend != nil {
+                                    try! realm.write {
+                                        for tweet in self.tweets {
+                                            savedTrend!.tweets.append(tweet)
+                                        }
                                     }
                                 }
                             }
+                        } catch let jsonError as NSError {
+                            print("json error: \(jsonError.localizedDescription)")
                         }
-                        
-                        self.trendsView.reloadSections(IndexSet.init(integer: self.tweetsViewSection))
-                    } catch let jsonError as NSError {
-                        print("json error: \(jsonError.localizedDescription)")
                     }
                 }
+
+                self.trendsView.reloadSections(IndexSet.init(integer: self.tweetsViewSection))
             } else {
-                if let url = URL.init(string: trendData[indexPath.row].url) {
+                if let url = URL.init(string: trends[indexPath.row].url) {
                     extensionContext?.open(url, completionHandler: nil)
                 }
             }
